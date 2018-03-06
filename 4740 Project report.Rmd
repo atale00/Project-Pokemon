@@ -1,0 +1,197 @@
+---
+title: "STSCI 4740 Project"
+author: "Zhongkun Jin, Rui Xin, Yaqing Yang, Xinyi Liu"
+date: "2017/11/22"
+output: html_document
+---
+
+Summary
+  The object of this project is to address the prediction of Pokemons. There are two main research problems that are needed to be figured out. First, what variables can be used to define the type of Pokemon. Second, how to predict whether a Pokemon is lengendary or not. To explore the data set, five main steps are included: load in data, feature engineering, explorary data analysis, feature selection, and modeling. In this report, the whole process will be clarified and the results will be explained in the end.
+
+Load in Data
+  At the beginning of the project, the CSV document is read in R-studio. However, some optimizations of data should be done to make the data availble to use when analyzing.
+
+Feature Engineering
+  The first step that has been done is to transfer Pokemons' types into dummy variables. Pokemons' type 1 and type 2 are broken down into separated types. In other word, different categories in types are separated and they become new dummy variables. For example, grass and poison. Then value of 1 or 0 are given to different Pokemons. If a Pokemon belongs to a certain type, it is given value 1 under this category. If not, this Pokemon will have value 0 under this category. 
+   
+```{r}
+options(warn=-1)
+library(readr)
+library(dummies)
+library(corrplot)
+library(plyr)
+library(ggplot2)
+library(leaps)
+library(caret)
+library(mlbench)
+library(randomForest)
+library(xgboost)
+library(glmnet)
+library(boot)
+Pokemon <- read_csv("E:/STSCI4740/proj/Pokemon.csv")
+firstd=as.data.frame(dummy(Pokemon$`Type 1`))
+secondd=as.data.frame(dummy(Pokemon$`Type 2`))
+colnames(firstd)=names(table(Pokemon$`Type 1`))
+colnames(secondd)=names(table(Pokemon$`Type 2`))
+Type=firstd+secondd[,-ncol(secondd)]
+Pokemon=cbind(Pokemon,Type)
+```
+  After the first step is done, the original data set is combined with these 18 new dummy variables and a brief view of how Pokemons distribute among the types is summarized using sapply function. Now an intuitive guess comes out and the group suspects that the length of Pokemons' names may affect the lengendary property of Pokemons. So further data operation has been done and a new variable counting Pokemons' names' strings is added into the data set.
+
+```{r}
+Pokemontype=sapply(Pokemon[,c(14:length(Pokemon))],sum)
+Pokemon$Length=sapply((strsplit(Pokemon$Name, " ")),length)
+```
+  Following this logic, the lengendary property(origincally displayed as TRUE/FALSE) is defined as a new variable. Lengendary Pokemons are given value 1s under the lengendary variable while others are given value 0s. And information of character variables that are needed have been extracted. To make the dataset clear and contains necessary information only, variables name, type 1, type 2 and number are dropped. 
+
+```{r}
+Refined=Pokemon[,-c(1:4)]
+Refined=Refined[,c(which(colnames(Refined)=="Legendary"),which(colnames(Refined)!="Legendary"))]
+Refined$Legendary=revalue(Refined$Legendary, c("False"=0, "True"=1))
+Refined$Legendary=as.numeric(Refined$Legendary)
+```
+  Now, the data set is well-prepared to do the further analysis.
+  
+  
+Explorary Data Analysis
+
+  To begin the data analysis, data visualization has been done in the first priority. In the beginning, the correlation matrix is drawn as below. It can be observed that there is a relatively strong correlation between Legendary and Total, HP, Attack, Defense, spAttack, spDefend, Speed, Dragon type, and length of the Pokemon names.
+
+```{r}
+correlationMatrix <- cor(Refined)
+corrplot(correlationMatrix, method = "circle")
+```
+
+  In addition to correlation matrix, the relationship between Pokemons' generations and legendary property is also interested. Using ggplot, the boxplot of Pokemons' total(sum of all stats that come after this, a general guide to how strong a pokemon is) versus their generations are displayed as below. The blue boxplots represent legendary Pokemons while the red ones represent non-legendary Pokemons. Through this plot, it could be observed that the difference between legendary and non-legendary Pokemon's total attribtue is pretty significant in all generations of Pokemons.
+```{r}
+
+p10 <- ggplot(Refined, aes(x = as.factor(Generation), y = Total,fill=as.factor(Legendary))) +
+     geom_boxplot() +
+     labs(x = "Generation",title = "Total Attribute of Pokemons in Different Generation") +
+     scale_fill_discrete(name = "Legendary")
+p10
+```
+
+  Now, the explorary data analysis moves to the next stage and the comparison between Pokemon types is interested. To visualize this part, some calculations of parameters should be done first. Thus, data of type 1 and type 2 are combined, the parameter count calculated the frequncies of different types such as bug and dark. Parameter legendary and non-legendary extract legendary and non-legendary Pokemons separately. Then the counts for legendary and non-legendary Pokemons are calculated individually for 18 types. Finally, the plot is made as below. It can be observed that in general, non-legendary Pokemons have much higher frequencies than legendary Pokemons under different types. And type dragon, flying, and psychic tend to have more legendary Pokemons than other types. 
+
+```{r}
+count=table(Pokemon$`Type 1`)+ table(Pokemon$`Type 2`)
+Type=rep(names(count),2)
+Legend <- Pokemon[ which(Pokemon$Legendary=='True'), ]
+nonLegend <- Pokemon[ which(Pokemon$Legendary=='False'), ]
+Lcount=as.vector(table(factor(Legend$`Type 1`, levels =names(count)))+table(factor(Legend$`Type 2`, levels =names(count))))
+Ncount=as.vector(table(factor(nonLegend$`Type 1`, levels =names(count)))+table(factor(nonLegend$`Type 2`, levels =names(count))))
+values <-c(Lcount, Ncount)
+type=c(rep("Legendary",length(names(count))),rep("Non-Legendary",length(names(count))))
+data=data.frame(Type, values)
+p <-ggplot(data, aes(Type, values))
+p +geom_bar(stat = "identity", aes(fill = type), position = "dodge")+
+theme(axis.text.x=element_text(angle=90,hjust=1,vjust=0.5))+
+labs(title = "Number of Legendary and Non-Legendary Pokemons among Different Types")
+
+```
+#Forward subset selection
+select 10 variables
+```{r}
+regfit.fwd=regsubsets(as.factor(Legendary)~.,data=Refined,nvmax=10,method="forward")
+coef(regfit.fwd,10)
+```
+Through forward selection, we observe that the top 10 variables that will be included in the model is Total, spAtk, Bug, Dragon, Electric, Ghost, Ground, Rock, length, and speed.
+
+Random Forest Modelling
+```{r}
+#Random Forest Code
+error=c()
+folds <- createFolds(1:800)
+names(Refined) <- sub(". ", "", names(Refined))
+for (i in 1:10){
+  train=Refined[-unlist(folds[i], use.names=FALSE),]
+  test=Refined[unlist(folds[i], use.names=FALSE),]
+  fit <- randomForest(as.factor(Legendary) ~ .,
+                      data=train, 
+                      importance=TRUE, 
+                      ntree=50,
+                      nodesize=3)
+  Prediction <- predict(fit, test)
+  error=c(error,table(Prediction==test$Legendary)[1])
+  errorrate=error/80
+  if (i==10){
+    i=importance(fit)
+    varImpPlot(fit)
+  }
+}
+randomforestrate=mean(errorrate)
+randomforestrate
+```
+I have used 10 fold cross validation for the random forest model, and the error rate is pretty low in this case. 
+
+```{r}
+x=Refined[, -which(names(Refined) %in% 'Legendary')]
+x<-sapply(x,as.numeric)
+cv.lasso <- cv.glmnet(x, y=as.factor(Refined$Legendary), family='binomial', alpha=1, standardize=TRUE, type.measure='auc')
+bestlam=cv.lasso$lambda.min
+lasso.mod=glmnet(x,as.factor(Refined$Legendary),alpha=1,lambda=0.01,family='binomial',standardize=TRUE)
+lasso.coef=coef(lasso.mod)[,1]
+lasso.coef[lasso.coef!=0]
+```
+
+#Xgboost
+```{r}
+y=Refined$Legendary
+xgbml <- xgboost(data = x, label =Refined$Legendary, eta = 0.5, objective = "binary:logistic",nrounds=2)
+xerror=c()
+for (i in 1:10){
+  train=x[-unlist(folds[i], use.names=FALSE),]
+  trainlabel=y[-unlist(folds[i], use.names=FALSE)]
+  test=x[unlist(folds[i], use.names=FALSE),]
+  testlabel=y[unlist(folds[i], use.names=FALSE)]
+  xgbml <- xgboost(data = train, label =trainlabel, eta = 0.5, objective = "binary:logistic",nrounds=2)
+  pred <- predict(xgbml, test)
+  prediction <- as.numeric(pred > 0.5)
+  err <- mean(prediction != testlabel)
+  xerror=c(xerror,err)
+}
+mean(xerror)
+```
+Logistic Regression
+```{r}
+glm.fit=glm(Legendary~.,data=Refined,family='binomial')
+cv.glm(Refined,glm.fit,K=10)$delta[1]
+```
+
+Stacking Logistic Regression, Random Forest, and Xgboost
+  The last step to address the prediction of Pokemon is to make the best use of models that are analyzed above. Since logistic regression, random forests and xgboost method all tend to have relatively small and similar error rates, the use of a combination of thesse methods may be considered as a reasonable approach. 
+  To apply this idea, a voting system has been designed. Logistic regression, random forests and xgboost method are applied parallely. If a certain Pokemon is recognized as legendary in two or more methods among the total three methods, it is marked as legendary. Otherwise, this Pokemon is labelled as non-legendary. 
+  After all Pokemons are marked as either legendary or non-legendary, 10-fold cross-validation error rate has been used to examine the accuracy of the prediction. The mean of test error rates is returned. This value could be a representative value of the error rate of this combined method. 
+  This could be evaluated as the final "model" to predict whether the Pokemon is legendary or not. Since this voting system balances advantages and disadvantages of three single methods, this system contains smaller error rate than three methods independently. It is resonable to use this final method to predict whether a Pokemon id legendary by 10 predictors. 
+```{r}
+totalerror=c()
+for (i in 1:10){
+  Ftrain=Refined[-unlist(folds[i], use.names=FALSE),]
+  Ftest=Refined[unlist(folds[i], use.names=FALSE),]
+  train=x[-unlist(folds[i], use.names=FALSE),]
+  trainlabel=y[-unlist(folds[i], use.names=FALSE)]
+  test=x[unlist(folds[i], use.names=FALSE),]
+  testlabel=y[unlist(folds[i], use.names=FALSE)]
+  xgbml <- xgboost(data = train, label =trainlabel, eta = 0.5, objective = "binary:logistic",nrounds=2)
+  xpred <- predict(xgbml, test)
+  xpred <- as.numeric(xpred > 0.5)
+  fit <- randomForest(as.factor(Legendary) ~ .,
+                      data=Ftrain, 
+                      importance=TRUE, 
+                      ntree=50,
+                      nodesize=3)  
+  rpred <- predict(fit,Ftest)
+  rpred=as.numeric(rpred)-1
+  mod_fit <- train(Legendary~., data=Ftrain,method="glm", family="binomial")
+  lpred=predict(mod_fit, newdata=test)
+  lpred[lpred>.5]=1
+  lpred[lpred<=.5]=0
+  sum=xpred+rpred+lpred
+  sum[sum<2]=0
+  sum[sum>=2]=1
+  totalerror=c(totalerror,mean(sum != testlabel))
+}
+mean(totalerror)
+```
+
